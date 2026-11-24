@@ -1,6 +1,7 @@
 package net.wurstclient.hacks;
 
 import java.util.Comparator;
+import java.util.Optional;
 import java.util.Random;
 import java.util.stream.StreamSupport;
 import org.lwjgl.glfw.GLFW;
@@ -8,9 +9,14 @@ import net.minecraft.client.util.InputUtil;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.entity.projectile.ProjectileUtil;
+import net.minecraft.item.AxeItem;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.SwordItem;
 import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.EntityHitResult;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.wurstclient.Category;
@@ -45,6 +51,12 @@ public final class KillauraHack extends Hack implements UpdateListener {
     private final CheckboxSetting onlyPlayers = new CheckboxSetting("Только игроки",
         "Не бить мобов и животных, только игроков.", true);
 
+    private final CheckboxSetting autoWeapon = new CheckboxSetting("Авто-меч",
+        "Автоматически брать меч из хотбара перед ударом.", true);
+
+    private final CheckboxSetting shieldBreaker = new CheckboxSetting("Ломать щит",
+        "Автоматически переключаться на топор, если враг закрылся щитом.", true);
+
     private final Random random = new Random();
     private Entity lockedTarget = null;
     private boolean vKeyPressed = false;
@@ -56,6 +68,8 @@ public final class KillauraHack extends Hack implements UpdateListener {
         addSetting(onlyCrits);
         addSetting(ignoreFriends);
         addSetting(onlyPlayers);
+        addSetting(autoWeapon);
+        addSetting(shieldBreaker);
     }
 
     @Override
@@ -74,7 +88,6 @@ public final class KillauraHack extends Hack implements UpdateListener {
     public void onUpdate() {
         if (MC.player == null || MC.world == null) return;
 
-        // Обработка нажатия клавиши V для захвата/сброса цели
         handleTargetLockKey();
 
         ServerMode mode = server.getSelected();
@@ -87,7 +100,6 @@ public final class KillauraHack extends Hack implements UpdateListener {
 
         Entity target = null;
 
-        // Если захвачена конкретная цель через V
         if (lockedTarget != null) {
             if (!lockedTarget.isAlive() || lockedTarget.isRemoved()) {
                 sendChat("§c[Killaura] Таргет сброшен (цель недоступна).");
@@ -95,11 +107,9 @@ public final class KillauraHack extends Hack implements UpdateListener {
             } else if (MC.player.distanceTo(lockedTarget) <= maxRange) {
                 target = lockedTarget;
             } else {
-                // Цель убежала дальше радиуса удара — ждём, пока подойдёт ближе, других не бьём
                 return;
             }
         } else {
-            // Обычный поиск ближайшего врага с учётом тиммейтов и настроек
             target = StreamSupport.stream(MC.world.getEntities().spliterator(), false)
                 .filter(this::isValidTarget)
                 .filter(e -> MC.player.distanceTo(e) <= maxRange)
@@ -120,39 +130,43 @@ public final class KillauraHack extends Hack implements UpdateListener {
         boolean canCrit = !onlyCrits.isChecked() || MC.player.isOnGround() || MC.player.fallDistance > 0.12F;
         if (!canCrit) return;
 
+        // Выбор оружия (топор против щита или меч)
+        int prevSlot = MC.player.getInventory().selectedSlot;
+        boolean swappedForShield = false;
+
+        if (shieldBreaker.isChecked() && target instanceof PlayerEntity p && p.isBlocking()) {
+            int axeSlot = findHotbarSlot(true);
+            if (axeSlot != -1) {
+                MC.player.getInventory().selectedSlot = axeSlot;
+                swappedForShield = true;
+            }
+        } else if (autoWeapon.isChecked()) {
+            int swordSlot = findHotbarSlot(false);
+            if (swordSlot != -1 && MC.player.getInventory().selectedSlot != swordSlot) {
+                MC.player.getInventory().selectedSlot = swordSlot;
+            }
+        }
+
         MC.interactionManager.attackEntity(MC.player, target);
         MC.player.swingHand(Hand.MAIN_HAND);
+
+        // Возвращаем меч обратно после пробития щита
+        if (swappedForShield) {
+            MC.player.getInventory().selectedSlot = prevSlot;
+        }
     }
 
-    private void handleTargetLockKey() {
-        if (MC.currentScreen != null) return;
-
-        boolean isDown = InputUtil.isKeyPressed(MC.getWindow(), GLFW.GLFW_KEY_V);
-        if (isDown && !vKeyPressed) {
-            vKeyPressed = true;
-            if (lockedTarget != null) {
-                sendChat("§e[Killaura] Таргет сброшен: " + lockedTarget.getName().getString());
-                lockedTarget = null;
-            } else if (MC.crosshairTarget instanceof EntityHitResult hit && hit.getEntity() instanceof LivingEntity entity) {
-                if (ignoreFriends.isChecked() && entity instanceof PlayerEntity p && WURST.getFriends().contains(p.getName().getString())) {
-                    sendChat("§c[Killaura] Нельзя взять тиммейта в таргет!");
-                    return;
-                }
-                lockedTarget = entity;
-                sendChat("§a[Killaura] Таргет захвачен: §f" + entity.getName().getString());
-            } else {
-                sendChat("§7[Killaura] Наведи прицел на игрока и нажми V.");
-            }
-        } else if (!isDown) {
-            vKeyPressed = false;
-        }
+    private int findHotbarSlot(boolean needAxe) {
+        for (int i = 0; i  !e.isSpectator() && e.canHit() && e instanceof LivingEntity,
+            distance * distance
+        );
+        return result != null ? result.getEntity() : null;
     }
 
     private boolean isValidTarget(Entity e) {
         if (e == MC.player || !(e instanceof LivingEntity l) || !l.isAlive()) return false;
         if (onlyPlayers.isChecked() && !(e instanceof PlayerEntity)) return false;
 
-        // Проверка на тиммейта (список друзей Wurst)
         if (ignoreFriends.isChecked() && e instanceof PlayerEntity p) {
             if (WURST.getFriends().contains(p.getName().getString())) {
                 return false;
